@@ -1,42 +1,40 @@
 # Outline Dashboard
 
-A self-hosted web dashboard for managing your [Outline VPN](https://getoutline.org) server. Built with Next.js.
+A self-hosted web UI for managing your [Outline VPN](https://getoutline.org) server. Built with Next.js.
 
-## Why I Built This
+## Why
 
-Outline's official manager is a desktop app — which means you're tied to one machine to create or delete access keys. I wanted to manage my VPN from any device: a phone, a tablet, a different laptop. So I built a simple web UI that talks directly to the Outline Management API and can be self-hosted alongside the server.
+Outline's official manager is a desktop app — you're stuck on one machine to manage keys. This gives you a browser-based dashboard you can open from your phone, tablet, or any laptop.
 
 ## Features
 
 - Add and delete access keys from any browser
-- See data usage per key with visual progress bars
+- Data usage per key with visual progress bars
 - Traffic share breakdown across all keys
-- Server details: hostname, version, port, cipher, uptime, and creation date
-- Highlights top consumer, unused keys, and keys over their data limit
-- Dark mode support
-- Auth-ready for production (Authelia + Traefik)
+- Server info: hostname, version, port, cipher, uptime
+- Flags top consumer, unused keys, and keys over their data limit
+- Dark mode
+- Production-ready auth via Authelia + Traefik
 
 ## Requirements
 
 - Node.js 18+
-- An Outline server with a known Management API URL (found in your `config.yml` or the Outline Manager app)
+- An Outline server and its Management API URL (from `config.yml` or the Outline Manager app's server settings)
 
-## Getting Started
+## Local Development
 
 ```bash
-git clone https://github.com/yourusername/outline-dashboard
-cd outline-dashboard
+git clone https://github.com/chitminthu/outline-manager-web
+cd outline-manager-web
 npm install
 ```
 
-Create a `.env.local` file:
+Create a `.env.local`:
 
 ```env
 OUTLINE_API_URL=https://your-server-ip:port/your-api-prefix
 AUTH_ENABLED=false
 ```
-
-Then run it:
 
 ```bash
 npm run dev
@@ -44,35 +42,176 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Production with Docker
+> **Finding your API URL:** In the Outline Manager desktop app, click the three-dot menu on your server → "View server config" → copy the `apiUrl` value.
 
-```dockerfile
-FROM node:20-alpine
-WORKDIR /app
-COPY . .
-RUN npm ci && npm run build
-EXPOSE 3000
-CMD ["npm", "start"]
+## Self-Hosting with Docker + Traefik + Authelia
+
+The recommended production setup uses Docker Compose with Traefik as a reverse proxy and Authelia for login protection.
+
+### Stack layout
+
+```
+Internet → Traefik (80/443 + Let's Encrypt)
+               ├─→ auth.yourdomain.com  → Authelia (login portal)
+               └─→ outline.yourdomain.com → This app
+                        (protected by Authelia forward-auth)
 ```
 
+### Dockerfile
+
+The app uses Next.js standalone output for a minimal image. Make sure `next.config.js` includes:
+
+```js
+const nextConfig = {
+  output: 'standalone',
+};
+module.exports = nextConfig;
+```
+
+```dockerfile
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+ENV OUTLINE_API_URL=http://placeholder
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser  --system --uid 1001 nextjs
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+CMD ["node", "server.js"]
+```
+
+### Production `.env`
+
+```env
+OUTLINE_API_URL=https://your-server-ip:port/your-api-prefix
+AUTH_ENABLED=true
+NODE_ENV=production
+```
+
+> Never prefix secrets with `NEXT_PUBLIC_` — those get bundled into the browser.
+
+### docker-compose.yml
+
+```yaml
+networks:
+  proxy:
+    external: true
+
+services:
+
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    networks: [proxy]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/traefik.yml:ro
+      - ./traefik/certs:/certs
+      - ./traefik/dynamic.yml:/dynamic.yml:ro
+
+  authelia:
+    image: authelia/authelia:latest
+    container_name: authelia
+    restart: unless-stopped
+    networks: [proxy]
+    volumes:
+      - ./authelia/config:/config
+      - ./authelia/secrets:/secrets
+    environment:
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secrets/jwt_secret
+      - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secrets/storage_encryption_key
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.authelia.rule=Host(`auth.yourdomain.com`)"
+      - "traefik.http.routers.authelia.entrypoints=websecure"
+      - "traefik.http.routers.authelia.tls.certresolver=letsencrypt"
+      - "traefik.http.services.authelia.loadbalancer.server.port=9091"
+
+  outline-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: outline-manager:latest
+    container_name: outline-app
+    restart: unless-stopped
+    networks: [proxy]
+    env_file: ./app/.env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.outline.rule=Host(`outline.yourdomain.com`)"
+      - "traefik.http.routers.outline.entrypoints=websecure"
+      - "traefik.http.routers.outline.tls.certresolver=letsencrypt"
+      - "traefik.http.services.outline.loadbalancer.server.port=3000"
+      - "traefik.http.routers.outline.middlewares=authelia@file"
+```
+
+The Authelia middleware is defined in `traefik/dynamic.yml` rather than Docker labels to avoid timing/discovery issues:
+
+```yaml
+# traefik/dynamic.yml
+http:
+  middlewares:
+    authelia:
+      forwardAuth:
+        address: "http://authelia:9091/api/verify?rd=https://auth.yourdomain.com"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - Remote-User
+          - Remote-Groups
+          - Remote-Name
+          - Remote-Email
+```
+
+### Deploy
+
 ```bash
-docker build -t outline-dashboard .
-docker run -e OUTLINE_API_URL=https://your-api-url -p 3000:3000 outline-dashboard
+docker network create proxy
+docker compose build outline-app
+docker compose up -d
+docker compose logs -f
+```
+
+### Update after a git push
+
+```bash
+git pull
+docker compose build outline-app
+docker compose up -d outline-app
 ```
 
 ## Authentication
 
-The app includes middleware ready for Authelia + Traefik. When you're ready to expose it publicly, set `AUTH_ENABLED=true` in your environment. Traefik will forward a `Remote-User` header after Authelia authenticates the request — the middleware enforces this on all API routes.
+`AUTH_ENABLED=true` enables the auth middleware on all API routes (`/api/addKey`, `/api/deleteKey`). Traefik + Authelia handle the login flow — after a successful login, Authelia forwards a `Remote-User` header which the middleware validates.
 
-## Where to Find Your API URL
-
-Open the Outline Manager desktop app, click the three-dot menu on your server, and select "View server config". The `apiUrl` field in the JSON is what goes in `OUTLINE_API_URL`.
+For local dev, set `AUTH_ENABLED=false` to skip auth entirely.
 
 ## Notes
 
-- The Outline API only stores cumulative bytes transferred — there is no "last active" timestamp available at the API level
+- The Outline API only stores cumulative bytes transferred — there's no "last active" timestamp at the API level
 - Data usage resets if you reinstall the Outline server
-- `rejectUnauthorized` is disabled for the internal API connection since Outline uses a self-signed certificate by default
+- `rejectUnauthorized` is disabled for the internal API connection since Outline uses a self-signed cert by default
 
 ## Stack
 

@@ -1,3 +1,4 @@
+//pages/api/addKey.js
 import { outlineApi } from '../../lib/outlineClient';
 import { withAuth } from '../../lib/authMiddleware';
 import { validateKeyName } from '../../lib/validation';

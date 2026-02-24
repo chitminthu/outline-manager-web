@@ -1,3 +1,4 @@
+//pages/index.js
 import { useState, useCallback } from 'react';
 import { useRouter } from 'next/router';
 import { Geist, Geist_Mono } from 'next/font/google';

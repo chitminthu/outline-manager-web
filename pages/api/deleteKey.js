@@ -1,3 +1,4 @@
+//pages/api/deleteKey.js
 import { outlineApi } from '../../lib/outlineClient';
 import { withAuth } from '../../lib/authMiddleware';
 import { validateKeyId } from '../../lib/validation';
