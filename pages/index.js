@@ -1,4 +1,3 @@
-//index.js
 import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import { Geist, Geist_Mono } from 'next/font/google';
@@ -8,6 +7,8 @@ import { outlineApi } from '../lib/outlineClient';
 
 const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
 const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
+
+// ── Formatters ────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
@@ -37,7 +38,6 @@ function formatUptime(ms) {
   return remMonths > 0 ? `${years}y ${remMonths}m` : `${years} year${years > 1 ? 's' : ''}`;
 }
 
-// Accepts: "10", "10GB", "10 GB", "500 MB", "1.5gb" — defaults to GB if no unit
 function parseLimit(str) {
   const s = str.trim().toUpperCase().replace(/\s+/g, '');
   const match = s.match(/^([\d.]+)(GB|MB|KB|B)?$/);
@@ -49,6 +49,7 @@ function parseLimit(str) {
   return Math.floor(num * multipliers[unit]);
 }
 
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 function UsageBar({ used, limit }) {
   if (!limit) return null;
@@ -134,6 +135,7 @@ function QRModal({ keyData, onClose }) {
   );
 }
 
+// ── Server-side data fetching ─────────────────────────────────────────────────
 
 export async function getServerSideProps() {
   const apiUrl = process.env.OUTLINE_API_URL;
@@ -214,6 +216,7 @@ export async function getServerSideProps() {
   }
 }
 
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
   const router = useRouter();
@@ -226,7 +229,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Inline rename
+  // Inline key rename
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef(null);
@@ -236,12 +239,17 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
   const [limitEditValue, setLimitEditValue] = useState('');
   const limitInputRef = useRef(null);
 
+  // Server name rename
+  const [isRenamingServer, setIsRenamingServer] = useState(false);
+  const [serverNameValue, setServerNameValue] = useState(serverInfo.name || '');
+  const serverNameInputRef = useRef(null);
+
   // QR modal
   const [qrKey, setQrKey] = useState(null);
 
   const refresh = useCallback(() => router.replace(router.asPath), [router]);
 
-  // ── Handlers
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleAddKey = async (e) => {
     e.preventDefault();
@@ -284,6 +292,30 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
     }
   };
 
+  const startRenameServer = () => {
+    setServerNameValue(serverInfo.name || '');
+    setIsRenamingServer(true);
+    setTimeout(() => serverNameInputRef.current?.select(), 0);
+  };
+
+  const commitRenameServer = async () => {
+    const trimmed = serverNameValue.trim();
+    setIsRenamingServer(false);
+    if (!trimmed || trimmed === serverInfo.name) return;
+    try {
+      const res = await fetch('/api/renameServer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) throw new Error();
+      toast.success('Server renamed');
+      refresh();
+    } catch {
+      toast.error('Failed to rename server');
+    }
+  };
+
   const startRename = (key) => {
     setRenamingId(key.id);
     setRenameValue(key.name || '');
@@ -317,10 +349,8 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
   const commitLimit = async (key) => {
     const raw = limitEditValue.trim();
     setLimitEditId(null);
-
-
     if (!raw) {
-      if (!key.limitBytes) return; 
+      if (!key.limitBytes) return;
       try {
         const res = await fetch('/api/setLimit', {
           method: 'POST',
@@ -335,14 +365,12 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
       }
       return;
     }
-
     const bytes = parseLimit(raw);
     if (bytes === null) {
       toast.error('Invalid limit. Use e.g. "10 GB" or "500 MB"');
       return;
     }
     if (bytes === key.limitBytes) return;
-
     try {
       const res = await fetch('/api/setLimit', {
         method: 'POST',
@@ -368,8 +396,6 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
 
   const activeKeys = keys.filter((k) => k.usedBytes > 0);
 
-  // ── Error state ───────────────────────────────────────────────────────────
-
   if (error) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-zinc-900 text-white">
@@ -381,7 +407,6 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
       </div>
     );
   }
-
 
   return (
     <div className={`${geistSans.variable} ${geistMono.variable} flex min-h-screen justify-center bg-zinc-50 font-sans dark:bg-black`}>
@@ -405,12 +430,39 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
             <h1 className="text-3xl font-semibold tracking-tight text-black dark:text-white">
               Outline Dashboard
             </h1>
-            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-              {serverInfo.name || 'Outline Server'}
-              {serverInfo.version && ` · v${serverInfo.version}`}
-              {serverInfo.createdTimestampMs && ` · Up ${formatUptime(serverInfo.createdTimestampMs)}`}
-            </p>
+
+            {/* Server name — click subtitle to rename */}
+            <div className="mt-1 flex items-center gap-1.5">
+              {isRenamingServer ? (
+                <input
+                  ref={serverNameInputRef}
+                  value={serverNameValue}
+                  onChange={(e) => setServerNameValue(e.target.value)}
+                  onBlur={commitRenameServer}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRenameServer();
+                    if (e.key === 'Escape') setIsRenamingServer(false);
+                  }}
+                  maxLength={100}
+                  className="rounded-md border border-zinc-300 bg-transparent px-2 py-0.5 text-sm text-zinc-600 focus:border-zinc-400 focus:outline-none dark:border-zinc-600 dark:text-zinc-400"
+                />
+              ) : (
+                <button
+                  onClick={startRenameServer}
+                  title="Click to rename server"
+                  className="group flex items-center gap-1.5 text-sm text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                >
+                  <span>
+                    {serverInfo.name || 'Outline Server'}
+                    {serverInfo.version && ` · v${serverInfo.version}`}
+                    {serverInfo.createdTimestampMs && ` · Up ${formatUptime(serverInfo.createdTimestampMs)}`}
+                  </span>
+                  <span className="opacity-0 text-xs text-zinc-400 transition group-hover:opacity-100">✎</span>
+                </button>
+              )}
+            </div>
           </div>
+
           <div className="mt-1 flex items-center gap-3">
             <span className={`rounded-full px-3 py-1 text-xs font-medium ${isMetricsEnabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`}>
               {isMetricsEnabled ? '● Metrics On' : '○ Metrics Off'}
@@ -552,7 +604,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                   return (
                     <tr key={key.id} className="transition-colors hover:bg-zinc-50 dark:hover:bg-white/[0.03]">
 
-                      {/* Name + ID — click name to rename */}
+                      {/* Name + ID */}
                       <td className="px-5 py-4">
                         <div className="flex flex-col gap-1">
                           <div className="flex flex-wrap items-center gap-1.5">
@@ -576,7 +628,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                                 className="group flex items-center gap-1 font-mono font-medium text-zinc-900 transition hover:text-zinc-600 dark:text-zinc-50 dark:hover:text-zinc-300"
                               >
                                 {key.name || 'Untitled'}
-                                <span className="opacity-0 text-xs text-zinc-400 group-hover:opacity-100 transition">✎</span>
+                                <span className="opacity-0 text-xs text-zinc-400 transition group-hover:opacity-100">✎</span>
                               </button>
                             )}
                             {isTop && <Badge color="amber">★ Top</Badge>}
@@ -608,7 +660,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                         )}
                       </td>
 
-                      {/* Limit — click to edit, empty to remove */}
+                      {/* Limit */}
                       <td className="px-5 py-4 font-mono text-sm">
                         {isEditingLimit ? (
                           <input
@@ -632,7 +684,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                             {key.limitBytes
                               ? <span className="text-zinc-600 dark:text-zinc-400">{formatBytes(key.limitBytes)}</span>
                               : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
-                            <span className="opacity-0 text-xs text-zinc-400 group-hover:opacity-100 transition">✎</span>
+                            <span className="opacity-0 text-xs text-zinc-400 transition group-hover:opacity-100">✎</span>
                           </button>
                         )}
                       </td>
@@ -649,7 +701,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                         ) : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
                       </td>
 
-                      {/* Key — Copy + QR */}
+                      {/* Key */}
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-2">
                           <button
@@ -660,7 +712,6 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                           </button>
                           <button
                             onClick={() => setQrKey(key)}
-                            title="Show QR code"
                             className="rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-200 dark:bg-white/5 dark:text-zinc-400 dark:hover:bg-white/10"
                           >
                             QR
@@ -668,7 +719,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                         </div>
                       </td>
 
-                      {/* Actions — Delete only */}
+                      {/* Actions */}
                       <td className="px-5 py-4">
                         <button
                           onClick={() => setDeleteTarget(key)}
