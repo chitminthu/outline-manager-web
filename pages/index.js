@@ -1,8 +1,9 @@
-//pages/index.js
-import { useState, useCallback } from 'react';
+//index.js
+import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import { Geist, Geist_Mono } from 'next/font/google';
 import toast from 'react-hot-toast';
+import { QRCodeSVG } from 'qrcode.react';
 import { outlineApi } from '../lib/outlineClient';
 
 const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
@@ -36,6 +37,19 @@ function formatUptime(ms) {
   return remMonths > 0 ? `${years}y ${remMonths}m` : `${years} year${years > 1 ? 's' : ''}`;
 }
 
+// Accepts: "10", "10GB", "10 GB", "500 MB", "1.5gb" — defaults to GB if no unit
+function parseLimit(str) {
+  const s = str.trim().toUpperCase().replace(/\s+/g, '');
+  const match = s.match(/^([\d.]+)(GB|MB|KB|B)?$/);
+  if (!match) return null;
+  const num = parseFloat(match[1]);
+  if (isNaN(num) || num < 0) return null;
+  const multipliers = { B: 1, KB: 1e3, MB: 1e6, GB: 1e9 };
+  const unit = match[2] || 'GB';
+  return Math.floor(num * multipliers[unit]);
+}
+
+
 function UsageBar({ used, limit }) {
   if (!limit) return null;
   const pct = Math.min((used / limit) * 100, 100);
@@ -49,7 +63,7 @@ function UsageBar({ used, limit }) {
 
 function StatCard({ label, value, sub, accent }) {
   return (
-    <div className={`flex flex-col gap-1 rounded-xl border bg-white p-5 dark:bg-zinc-900/50 ${accent ? 'border-red-500/30 dark:border-red-500/30' : 'border-black/10 dark:border-white/10'}`}>
+    <div className={`flex flex-col gap-1 rounded-xl border bg-white p-5 dark:bg-zinc-900/50 ${accent ? 'border-red-500/30' : 'border-black/10 dark:border-white/10'}`}>
       <span className="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{label}</span>
       <span className={`text-2xl font-semibold ${accent ? 'text-red-500' : 'text-black dark:text-white'}`}>{value}</span>
       {sub && <span className="text-xs text-zinc-500 dark:text-zinc-400">{sub}</span>}
@@ -81,18 +95,12 @@ function DeleteModal({ keyName, onConfirm, onCancel, isDeleting }) {
           This action cannot be undone.
         </p>
         <div className="mt-6 flex justify-end gap-3">
-          <button
-            onClick={onCancel}
-            disabled={isDeleting}
-            className="rounded-full px-5 py-2 text-sm font-medium text-zinc-300 transition hover:bg-white/10 disabled:opacity-50"
-          >
+          <button onClick={onCancel} disabled={isDeleting}
+            className="rounded-full px-5 py-2 text-sm font-medium text-zinc-300 transition hover:bg-white/10 disabled:opacity-50">
             Cancel
           </button>
-          <button
-            onClick={onConfirm}
-            disabled={isDeleting}
-            className="rounded-full bg-red-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-50"
-          >
+          <button onClick={onConfirm} disabled={isDeleting}
+            className="rounded-full bg-red-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-50">
             {isDeleting ? 'Deleting…' : 'Delete'}
           </button>
         </div>
@@ -101,12 +109,37 @@ function DeleteModal({ keyName, onConfirm, onCancel, isDeleting }) {
   );
 }
 
+function QRModal({ keyData, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={onClose}>
+      <div className="w-full max-w-xs rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-white">{keyData.name || 'Untitled'}</h3>
+            <p className="text-xs text-zinc-500">Scan with the Outline app</p>
+          </div>
+          <button onClick={onClose}
+            className="rounded-full p-1.5 text-zinc-400 transition hover:bg-white/10 hover:text-white">
+            ✕
+          </button>
+        </div>
+        <div className="flex justify-center rounded-xl bg-white p-4">
+          <QRCodeSVG value={keyData.accessUrl} size={200} />
+        </div>
+        <p className="mt-3 break-all text-center font-mono text-xs text-zinc-500">{keyData.accessUrl}</p>
+      </div>
+    </div>
+  );
+}
+
+
 export async function getServerSideProps() {
   const apiUrl = process.env.OUTLINE_API_URL;
   if (!apiUrl) {
     return { props: { keys: [], serverInfo: {}, isMetricsEnabled: false } };
   }
-
   try {
     const [keysRes, metricsRes, serverRes, metricsEnabledRes] = await Promise.all([
       outlineApi.get('/access-keys/'),
@@ -119,7 +152,6 @@ export async function getServerSideProps() {
     const transferMetrics = metricsRes.data.bytesTransferredByUserId || {};
     const serverInfo = serverRes.data || {};
     const isMetricsEnabled = metricsEnabledRes.data.metricsEnabled || false;
-
     const totalUsageBytes = Object.values(transferMetrics).reduce((s, b) => s + b, 0);
 
     const keys = rawKeys
@@ -127,9 +159,7 @@ export async function getServerSideProps() {
         const usedBytes = transferMetrics[key.id] || 0;
         const limitBytes = key.dataLimit?.bytes || null;
         const usedPct = limitBytes ? Math.min((usedBytes / limitBytes) * 100, 100) : null;
-        const trafficShare = totalUsageBytes > 0
-          ? ((usedBytes / totalUsageBytes) * 100).toFixed(1)
-          : '0.0';
+        const trafficShare = totalUsageBytes > 0 ? ((usedBytes / totalUsageBytes) * 100).toFixed(1) : '0.0';
         const isOverLimit = limitBytes ? usedBytes >= limitBytes : false;
         return {
           id: key.id,
@@ -184,14 +214,34 @@ export async function getServerSideProps() {
   }
 }
 
+
 export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
   const router = useRouter();
+
+  // Add key
   const [newKeyName, setNewKeyName] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+
+  // Delete
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Inline rename
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState('');
+  const renameInputRef = useRef(null);
+
+  // Inline limit edit
+  const [limitEditId, setLimitEditId] = useState(null);
+  const [limitEditValue, setLimitEditValue] = useState('');
+  const limitInputRef = useRef(null);
+
+  // QR modal
+  const [qrKey, setQrKey] = useState(null);
+
   const refresh = useCallback(() => router.replace(router.asPath), [router]);
+
+  // ── Handlers
 
   const handleAddKey = async (e) => {
     e.preventDefault();
@@ -204,7 +254,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
         body: JSON.stringify({ name: newKeyName.trim() }),
       });
       if (!res.ok) throw new Error();
-      toast.success('Key added successfully');
+      toast.success('Key added');
       setNewKeyName('');
       refresh();
     } catch {
@@ -234,6 +284,79 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
     }
   };
 
+  const startRename = (key) => {
+    setRenamingId(key.id);
+    setRenameValue(key.name || '');
+    setTimeout(() => renameInputRef.current?.select(), 0);
+  };
+
+  const commitRename = async (key) => {
+    const trimmed = renameValue.trim();
+    setRenamingId(null);
+    if (!trimmed || trimmed === key.name) return;
+    try {
+      const res = await fetch('/api/renameKey', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: key.id, name: trimmed }),
+      });
+      if (!res.ok) throw new Error();
+      toast.success('Key renamed');
+      refresh();
+    } catch {
+      toast.error('Failed to rename key');
+    }
+  };
+
+  const startLimitEdit = (key) => {
+    setLimitEditId(key.id);
+    setLimitEditValue(key.limitBytes ? formatBytes(key.limitBytes).replace(' ', '') : '');
+    setTimeout(() => limitInputRef.current?.select(), 0);
+  };
+
+  const commitLimit = async (key) => {
+    const raw = limitEditValue.trim();
+    setLimitEditId(null);
+
+
+    if (!raw) {
+      if (!key.limitBytes) return; 
+      try {
+        const res = await fetch('/api/setLimit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: key.id, bytes: null }),
+        });
+        if (!res.ok) throw new Error();
+        toast.success('Limit removed');
+        refresh();
+      } catch {
+        toast.error('Failed to remove limit');
+      }
+      return;
+    }
+
+    const bytes = parseLimit(raw);
+    if (bytes === null) {
+      toast.error('Invalid limit. Use e.g. "10 GB" or "500 MB"');
+      return;
+    }
+    if (bytes === key.limitBytes) return;
+
+    try {
+      const res = await fetch('/api/setLimit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: key.id, bytes }),
+      });
+      if (!res.ok) throw new Error();
+      toast.success(`Limit set to ${formatBytes(bytes)}`);
+      refresh();
+    } catch {
+      toast.error('Failed to set limit');
+    }
+  };
+
   const copyToClipboard = async (text) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -244,6 +367,8 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
   };
 
   const activeKeys = keys.filter((k) => k.usedBytes > 0);
+
+  // ── Error state ───────────────────────────────────────────────────────────
 
   if (error) {
     return (
@@ -257,8 +382,11 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
     );
   }
 
+
   return (
     <div className={`${geistSans.variable} ${geistMono.variable} flex min-h-screen justify-center bg-zinc-50 font-sans dark:bg-black`}>
+
+      {/* Modals */}
       {deleteTarget && (
         <DeleteModal
           keyName={deleteTarget.name || 'Untitled'}
@@ -267,6 +395,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
           isDeleting={isDeleting}
         />
       )}
+      {qrKey && <QRModal keyData={qrKey} onClose={() => setQrKey(null)} />}
 
       <main className="flex w-full max-w-6xl flex-col gap-10 px-4 py-16 sm:px-8">
 
@@ -282,9 +411,15 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
               {serverInfo.createdTimestampMs && ` · Up ${formatUptime(serverInfo.createdTimestampMs)}`}
             </p>
           </div>
-          <span className={`mt-1 rounded-full px-3 py-1 text-xs font-medium ${isMetricsEnabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`}>
-            {isMetricsEnabled ? '● Metrics On' : '○ Metrics Off'}
-          </span>
+          <div className="mt-1 flex items-center gap-3">
+            <span className={`rounded-full px-3 py-1 text-xs font-medium ${isMetricsEnabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`}>
+              {isMetricsEnabled ? '● Metrics On' : '○ Metrics Off'}
+            </span>
+            <a href="https://auth.chitminthu.me/logout"
+              className="rounded-full border border-black/10 px-4 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-400 dark:hover:bg-white/5">
+              Sign out
+            </a>
+          </div>
         </div>
 
         {!isMetricsEnabled && (
@@ -295,30 +430,15 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
 
         {/* Summary Stats */}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <StatCard
-            label="Total Keys"
-            value={keys.length}
-            sub={`${serverInfo.unusedKeys ?? 0} never used`}
-          />
-          <StatCard
-            label="Active Keys"
-            value={serverInfo.activeKeys ?? 0}
-            sub="used at least once"
-          />
-          <StatCard
-            label="Total Usage"
-            value={formatBytes(serverInfo.totalUsage)}
-            sub={`avg ${formatBytes(serverInfo.avgUsageBytes)} / active key`}
-          />
-          <StatCard
-            label="Over Limit"
-            value={serverInfo.keysOverLimit ?? 0}
+          <StatCard label="Total Keys" value={keys.length} sub={`${serverInfo.unusedKeys ?? 0} never used`} />
+          <StatCard label="Active Keys" value={serverInfo.activeKeys ?? 0} sub="used at least once" />
+          <StatCard label="Total Usage" value={formatBytes(serverInfo.totalUsage)} sub={`avg ${formatBytes(serverInfo.avgUsageBytes)} / active key`} />
+          <StatCard label="Over Limit" value={serverInfo.keysOverLimit ?? 0}
             sub={serverInfo.keysOverLimit > 0 ? 'keys at capacity' : 'all within limit'}
-            accent={serverInfo.keysOverLimit > 0}
-          />
+            accent={serverInfo.keysOverLimit > 0} />
         </div>
 
-        {/* Server Info + Traffic Breakdown + Add Key */}
+        {/* Server Info + Traffic + Add Key */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
 
           {/* Server Details */}
@@ -410,7 +530,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-black/10 dark:border-white/10">
               <tr>
-                {['Name / ID', 'Cipher · Port', 'Data Used', 'Limit', 'Traffic Share', 'Access Key', 'Actions'].map((h) => (
+                {['Name / ID', 'Cipher · Port', 'Data Used', 'Limit', 'Traffic Share', 'Key', 'Actions'].map((h) => (
                   <th key={h} className="whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{h}</th>
                 ))}
               </tr>
@@ -426,16 +546,39 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                 keys.map((key, i) => {
                   const isTop = i === 0 && key.usedBytes > 0;
                   const neverUsed = key.usedBytes === 0;
+                  const isRenaming = renamingId === key.id;
+                  const isEditingLimit = limitEditId === key.id;
+
                   return (
                     <tr key={key.id} className="transition-colors hover:bg-zinc-50 dark:hover:bg-white/[0.03]">
 
-                      {/* Name + ID */}
+                      {/* Name + ID — click name to rename */}
                       <td className="px-5 py-4">
                         <div className="flex flex-col gap-1">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-mono font-medium text-zinc-900 dark:text-zinc-50">
-                              {key.name || 'Untitled'}
-                            </span>
+                            {isRenaming ? (
+                              <input
+                                ref={renameInputRef}
+                                value={renameValue}
+                                onChange={(e) => setRenameValue(e.target.value)}
+                                onBlur={() => commitRename(key)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') commitRename(key);
+                                  if (e.key === 'Escape') setRenamingId(null);
+                                }}
+                                maxLength={100}
+                                className="rounded-md border border-zinc-300 bg-transparent px-2 py-0.5 font-mono text-sm text-zinc-900 focus:border-zinc-500 focus:outline-none dark:border-zinc-600 dark:text-zinc-50"
+                              />
+                            ) : (
+                              <button
+                                onClick={() => startRename(key)}
+                                title="Click to rename"
+                                className="group flex items-center gap-1 font-mono font-medium text-zinc-900 transition hover:text-zinc-600 dark:text-zinc-50 dark:hover:text-zinc-300"
+                              >
+                                {key.name || 'Untitled'}
+                                <span className="opacity-0 text-xs text-zinc-400 group-hover:opacity-100 transition">✎</span>
+                              </button>
+                            )}
                             {isTop && <Badge color="amber">★ Top</Badge>}
                             {neverUsed && <Badge color="zinc">Unused</Badge>}
                             {key.isOverLimit && <Badge color="red">Over limit</Badge>}
@@ -465,38 +608,67 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                         )}
                       </td>
 
-                      {/* Limit */}
+                      {/* Limit — click to edit, empty to remove */}
                       <td className="px-5 py-4 font-mono text-sm">
-                        {key.limitBytes
-                          ? <span className="text-zinc-600 dark:text-zinc-400">{formatBytes(key.limitBytes)}</span>
-                          : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
+                        {isEditingLimit ? (
+                          <input
+                            ref={limitInputRef}
+                            value={limitEditValue}
+                            onChange={(e) => setLimitEditValue(e.target.value)}
+                            onBlur={() => commitLimit(key)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitLimit(key);
+                              if (e.key === 'Escape') setLimitEditId(null);
+                            }}
+                            placeholder="e.g. 10GB"
+                            className="w-24 rounded-md border border-zinc-300 bg-transparent px-2 py-0.5 text-sm text-zinc-900 focus:border-zinc-500 focus:outline-none dark:border-zinc-600 dark:text-zinc-50"
+                          />
+                        ) : (
+                          <button
+                            onClick={() => startLimitEdit(key)}
+                            title="Click to set limit (leave empty to remove)"
+                            className="group flex items-center gap-1 transition"
+                          >
+                            {key.limitBytes
+                              ? <span className="text-zinc-600 dark:text-zinc-400">{formatBytes(key.limitBytes)}</span>
+                              : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
+                            <span className="opacity-0 text-xs text-zinc-400 group-hover:opacity-100 transition">✎</span>
+                          </button>
+                        )}
                       </td>
 
                       {/* Traffic Share */}
                       <td className="px-5 py-4 font-mono text-sm">
-                        {key.usedBytes > 0
-                          ? (
-                            <div>
-                              <span className="text-zinc-700 dark:text-zinc-300">{key.trafficShare}%</span>
-                              <div className="mt-1 h-1 w-16 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
-                                <div className="h-full rounded-full bg-cyan-500" style={{ width: `${key.trafficShare}%` }} />
-                              </div>
+                        {key.usedBytes > 0 ? (
+                          <div>
+                            <span className="text-zinc-700 dark:text-zinc-300">{key.trafficShare}%</span>
+                            <div className="mt-1 h-1 w-16 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                              <div className="h-full rounded-full bg-cyan-500" style={{ width: `${key.trafficShare}%` }} />
                             </div>
-                          )
-                          : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
+                          </div>
+                        ) : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
                       </td>
 
-                      {/* Access Key */}
+                      {/* Key — Copy + QR */}
                       <td className="px-5 py-4">
-                        <button
-                          onClick={() => copyToClipboard(key.accessUrl)}
-                          className="rounded-full bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-600 transition hover:bg-cyan-500/20 dark:text-cyan-400"
-                        >
-                          Copy Key
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => copyToClipboard(key.accessUrl)}
+                            className="rounded-full bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-600 transition hover:bg-cyan-500/20 dark:text-cyan-400"
+                          >
+                            Copy
+                          </button>
+                          <button
+                            onClick={() => setQrKey(key)}
+                            title="Show QR code"
+                            className="rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-200 dark:bg-white/5 dark:text-zinc-400 dark:hover:bg-white/10"
+                          >
+                            QR
+                          </button>
+                        </div>
                       </td>
 
-                      {/* Actions */}
+                      {/* Actions — Delete only */}
                       <td className="px-5 py-4">
                         <button
                           onClick={() => setDeleteTarget(key)}
@@ -505,6 +677,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
                           Delete
                         </button>
                       </td>
+
                     </tr>
                   );
                 })
@@ -514,7 +687,7 @@ export default function Home({ keys, serverInfo, isMetricsEnabled, error }) {
         </div>
 
         <p className="text-center text-xs text-zinc-400">
-          Usage is cumulative since server creation · Sorted by data used (highest first)
+          Usage is cumulative since server creation · Sorted by data used (highest first) · Click any name or limit to edit
         </p>
 
       </main>
