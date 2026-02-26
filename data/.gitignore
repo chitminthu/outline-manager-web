@@ -1,0 +1,5 @@
+# Ignore the real store (contains API tokens)
+servers.json
+
+# Keep the sample file tracked
+!servers.sample.json

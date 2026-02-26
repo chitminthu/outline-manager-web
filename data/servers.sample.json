@@ -1,0 +1,8 @@
+[
+  {
+    "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "name": "My Outline Server",
+    "apiUrl": "https://your-server-ip:port/your-api-token",
+    "addedAt": 1708000000000
+  }
+]
