@@ -1,7 +1,7 @@
-//pages/api/servders/[id]/status.js
+// pages/api/servers/[id]/status.js
 import { withAuth } from '../../../../lib/authMiddleware';
 import { validateServerId } from '../../../../lib/validation';
-import { getServer } from '../../../../lib/serverStore';
+import { getServer, updateServerName } from '../../../../lib/serverStore';
 import { createOutlineApi } from '../../../../lib/outlineClient';
 
 const TIMEOUT_MS = 6000;
@@ -22,13 +22,20 @@ async function handler(req, res) {
       api.get('/metrics/transfer', { timeout: TIMEOUT_MS }),
     ]);
 
+    const realName = serverRes.data.name || server.name;
     const totalBytes = Object.values(
       metricsRes.data.bytesTransferredByUserId || {}
     ).reduce((s, b) => s + b, 0);
 
+    // Keep servers.json in sync with the real Outline server name.
+    // This eliminates the flash where the old local name shows during loading.
+    if (realName && realName !== server.name) {
+      updateServerName(id, realName);
+    }
+
     return res.status(200).json({
       online: true,
-      name: serverRes.data.name || server.name,
+      name: realName,
       version: serverRes.data.version || null,
       keyCount: (keysRes.data.accessKeys || []).length,
       totalBytes,
