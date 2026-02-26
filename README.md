@@ -17,7 +17,12 @@ Outline's official manager is a desktop app — you're stuck on one machine to m
 - QR codes for easy mobile key sharing
 - Server info: hostname, version, port, cipher, uptime
 - Flags top consumer, unused keys, and keys over their limit
+- Support dark mode
 - Authentication via Authelia + Traefik
+
+## Screenshots
+
+<img width="2996" height="2726" alt="Outline Dashboard — Mockup" src="https://github.com/user-attachments/assets/a486c1ab-38bd-4d6b-a21e-d086a39a823c" />
 
 ---
 
