@@ -17,8 +17,7 @@ Outline's official manager is a desktop app — you're stuck on one machine to m
 - QR codes for easy mobile key sharing
 - Server info: hostname, version, port, cipher, uptime
 - Flags top consumer, unused keys, and keys over their limit
-- Dark mode
-- Production auth via Authelia + Traefik
+- Authentication via Authelia + Traefik
 
 ---
 
@@ -26,7 +25,7 @@ Outline's official manager is a desktop app — you're stuck on one machine to m
 
 ### Single server (simplest path)
 
-Set `OUTLINE_API_URL` in `.env.local` and run the app. On first start, `data/servers.json` is auto-created with that server pre-loaded. You'll land on the dashboard with one server card ready to go — no extra setup needed. This means anyone who forks this repo to manage one server can just set their env and go.
+Set `OUTLINE_API_URL` in `.env` and run the app. On first start, `data/servers.json` is auto-created with that server pre-loaded. You'll land on the dashboard with one server card ready to go — no extra setup needed. This means anyone who forks this repo to manage one server can just set their env and go.
 
 ### Multiple servers
 
@@ -79,7 +78,7 @@ npm install
 npm install qrcode.react
 ```
 
-Create `.env.local`:
+Create `.env`:
 
 ```env
 OUTLINE_API_URL=https://your-server-ip:port/your-api-prefix
