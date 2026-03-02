@@ -1,4 +1,4 @@
-//pages/server/[id].js
+// pages/server/[id].js
 import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Link from 'next/link';
@@ -39,6 +39,22 @@ function formatUptime(ms) {
   const years = Math.floor(months / 12);
   const remMonths = months % 12;
   return remMonths > 0 ? `${years}y ${remMonths}m` : `${years} year${years > 1 ? 's' : ''}`;
+}
+
+function formatLastSeen(unixSeconds) {
+  if (!unixSeconds) return null;
+  const diffMs = Date.now() - unixSeconds * 1000;
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 2) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return '1 day ago';
+  if (days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
 }
 
 function parseLimit(str) {
@@ -85,6 +101,24 @@ function Badge({ children, color }) {
     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors[color] || colors.zinc}`}>
       {children}
     </span>
+  );
+}
+
+// Sortable column header — shows arrow indicator for active sort
+function SortHeader({ label, field, sortField, sortDir, onSort }) {
+  const isActive = sortField === field;
+  return (
+    <th
+      onClick={() => onSort(field)}
+      className="cursor-pointer select-none whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+    >
+      <span className="flex items-center gap-1">
+        {label}
+        <span className={`transition ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-50'}`}>
+          {isActive ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕'}
+        </span>
+      </span>
+    </th>
   );
 }
 
@@ -148,11 +182,13 @@ export async function getServerSideProps({ params }) {
 
   try {
     const api = createOutlineApi(server.apiUrl);
-    const [keysRes, metricsRes, serverRes, metricsEnabledRes] = await Promise.all([
+
+    const [keysRes, metricsRes, serverRes, metricsEnabledRes, experimentalRes] = await Promise.all([
       api.get('/access-keys/'),
       api.get('/metrics/transfer'),
       api.get('/server'),
       api.get('/metrics/enabled'),
+      api.get('/experimental/server/metrics', { params: { since: '24h' } }).catch(() => null),
     ]);
 
     const rawKeys = keysRes.data.accessKeys || [];
@@ -161,6 +197,14 @@ export async function getServerSideProps({ params }) {
     const isMetricsEnabled = metricsEnabledRes.data.metricsEnabled || false;
     const totalUsageBytes = Object.values(transferMetrics).reduce((s, b) => s + b, 0);
 
+    // Build lookup map — stringify accessKeyId since key.id from standard API is a string
+    const experimentalByKeyId = {};
+    if (experimentalRes?.data?.accessKeys) {
+      for (const k of experimentalRes.data.accessKeys) {
+        experimentalByKeyId[String(k.accessKeyId)] = k;
+      }
+    }
+
     const keys = rawKeys
       .map((key) => {
         const usedBytes = transferMetrics[key.id] || 0;
@@ -168,26 +212,33 @@ export async function getServerSideProps({ params }) {
         const usedPct = limitBytes ? Math.min((usedBytes / limitBytes) * 100, 100) : null;
         const trafficShare = totalUsageBytes > 0 ? ((usedBytes / totalUsageBytes) * 100).toFixed(1) : '0.0';
         const isOverLimit = limitBytes ? usedBytes >= limitBytes : false;
+
+        const exp = experimentalByKeyId[key.id] || null;
+        const lastTrafficSeen = exp?.connection?.lastTrafficSeen || null;
+        // peakDeviceCount.data is the count — use ?? not || so 0 is preserved
+        const peakDeviceCount = exp?.connection?.peakDeviceCount?.data ?? null;
+
         return {
           id: key.id,
           name: key.name || '',
-          port: key.port || null,
-          method: key.method || null,
           accessUrl: key.accessUrl || '',
           usedBytes,
           limitBytes,
           usedPct,
-          trafficShare,
+          trafficShare: parseFloat(trafficShare),
           isOverLimit,
+          lastTrafficSeen,
+          peakDeviceCount,
         };
       })
-      .sort((a, b) => b.usedBytes - a.usedBytes);
+      .sort((a, b) => b.usedBytes - a.usedBytes); // default sort
 
     const activeKeys = keys.filter((k) => k.usedBytes > 0).length;
     const unusedKeys = keys.filter((k) => k.usedBytes === 0).length;
     const keysOverLimit = keys.filter((k) => k.isOverLimit).length;
     const avgUsageBytes = activeKeys > 0 ? Math.floor(totalUsageBytes / activeKeys) : 0;
     const defaultLimitBytes = serverInfo.accessKeyDataLimit?.bytes || null;
+    const hasExperimental = experimentalRes !== null;
 
     return {
       props: {
@@ -195,6 +246,7 @@ export async function getServerSideProps({ params }) {
         keys,
         serverInfo: {
           name: serverInfo.name || server.name || null,
+          cipher: rawKeys[0]?.method || null,
           serverId: serverInfo.serverId || null,
           version: serverInfo.version || null,
           hostnameForAccessKeys: serverInfo.hostnameForAccessKeys || null,
@@ -208,6 +260,7 @@ export async function getServerSideProps({ params }) {
           avgUsageBytes,
         },
         isMetricsEnabled,
+        hasExperimental,
       },
     };
   } catch {
@@ -217,6 +270,7 @@ export async function getServerSideProps({ params }) {
         keys: [],
         serverInfo: { name: server.name },
         isMetricsEnabled: false,
+        hasExperimental: false,
         error: 'Could not connect to the Outline server.',
       },
     };
@@ -225,28 +279,98 @@ export async function getServerSideProps({ params }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnabled, error }) {
+export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, isMetricsEnabled, hasExperimental, error }) {
   const router = useRouter();
 
+  // Sorting state — default: data used descending
+  const [sortField, setSortField] = useState('usedBytes');
+  const [sortDir, setSortDir] = useState('desc');
+
+  // Clicking the same column toggles direction; clicking a new column defaults to desc
+  const handleSort = (field) => {
+    if (field === sortField) {
+      setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortField(field);
+      // name sorts asc by default (A→Z); everything else desc (highest first)
+      setSortDir(field === 'name' ? 'asc' : 'desc');
+    }
+  };
+
+  // Apply sort to keys — no server round-trip, purely client-side
+  const keys = [...initialKeys].sort((a, b) => {
+    let aVal, bVal;
+    switch (sortField) {
+      case 'name':
+        aVal = (a.name || '').toLowerCase();
+        bVal = (b.name || '').toLowerCase();
+        return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      case 'usedBytes':
+        aVal = a.usedBytes;
+        bVal = b.usedBytes;
+        break;
+      case 'trafficShare':
+        aVal = a.trafficShare;
+        bVal = b.trafficShare;
+        break;
+      case 'lastTrafficSeen':
+        // null (never used) always goes to bottom regardless of sort direction
+        if (!a.lastTrafficSeen && !b.lastTrafficSeen) return 0;
+        if (!a.lastTrafficSeen) return 1;
+        if (!b.lastTrafficSeen) return -1;
+        aVal = a.lastTrafficSeen;
+        bVal = b.lastTrafficSeen;
+        break;
+      case 'peakDeviceCount':
+        aVal = a.peakDeviceCount ?? -1;
+        bVal = b.peakDeviceCount ?? -1;
+        break;
+      default:
+        return 0;
+    }
+    return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
+  });
+
+  // Add key
   const [newKeyName, setNewKeyName] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+
+  // Delete key
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Inline key rename
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef(null);
+
+  // Inline per-key limit edit
   const [limitEditId, setLimitEditId] = useState(null);
   const [limitEditValue, setLimitEditValue] = useState('');
   const limitInputRef = useRef(null);
+
+  // Inline server default limit edit
+  const [isEditingServerLimit, setIsEditingServerLimit] = useState(false);
+  const [serverLimitValue, setServerLimitValue] = useState(
+    serverInfo.defaultLimitBytes ? formatBytes(serverInfo.defaultLimitBytes).replace(' ', '') : ''
+  );
+  const serverLimitInputRef = useRef(null);
+
+  // Server name rename
   const [isRenamingServer, setIsRenamingServer] = useState(false);
   const [serverNameValue, setServerNameValue] = useState(serverInfo.name || '');
   const serverNameInputRef = useRef(null);
+
+  // Metrics toggle — optimistic
+  const [metricsEnabled, setMetricsEnabled] = useState(isMetricsEnabled);
+  const [isTogglingMetrics, setIsTogglingMetrics] = useState(false);
+
+  // QR modal
   const [qrKey, setQrKey] = useState(null);
 
   const refresh = useCallback(() => router.replace(router.asPath), [router]);
 
-  // All API calls include serverId so the server-side handler knows which
-  // Outline server to talk to.
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleAddKey = async (e) => {
     e.preventDefault();
@@ -310,6 +434,74 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
       refresh();
     } catch {
       toast.error('Failed to rename server');
+    }
+  };
+
+  const startEditServerLimit = () => {
+    setServerLimitValue(
+      serverInfo.defaultLimitBytes ? formatBytes(serverInfo.defaultLimitBytes).replace(' ', '') : ''
+    );
+    setIsEditingServerLimit(true);
+    setTimeout(() => serverLimitInputRef.current?.select(), 0);
+  };
+
+  const commitServerLimit = async () => {
+    const raw = serverLimitValue.trim();
+    setIsEditingServerLimit(false);
+    if (!raw) {
+      if (!serverInfo.defaultLimitBytes) return;
+      try {
+        const res = await fetch('/api/setServerLimit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serverId, bytes: null }),
+        });
+        if (!res.ok) throw new Error();
+        toast.success('Default limit removed');
+        refresh();
+      } catch {
+        toast.error('Failed to remove default limit');
+      }
+      return;
+    }
+    const bytes = parseLimit(raw);
+    if (bytes === null) {
+      toast.error('Invalid limit. Use e.g. "100 GB" or "500 MB"');
+      return;
+    }
+    if (bytes === serverInfo.defaultLimitBytes) return;
+    try {
+      const res = await fetch('/api/setServerLimit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverId, bytes }),
+      });
+      if (!res.ok) throw new Error();
+      toast.success(`Default limit set to ${formatBytes(bytes)}`);
+      refresh();
+    } catch {
+      toast.error('Failed to set default limit');
+    }
+  };
+
+  const handleToggleMetrics = async () => {
+    if (isTogglingMetrics) return;
+    const newValue = !metricsEnabled;
+    setIsTogglingMetrics(true);
+    setMetricsEnabled(newValue);
+    try {
+      const res = await fetch('/api/toggleMetrics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverId, enabled: newValue }),
+      });
+      if (!res.ok) throw new Error();
+      toast.success(`Metrics ${newValue ? 'enabled' : 'disabled'}`);
+    } catch {
+      setMetricsEnabled(!newValue);
+      toast.error('Failed to toggle metrics');
+    } finally {
+      setIsTogglingMetrics(false);
     }
   };
 
@@ -391,7 +583,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
     }
   };
 
-  const activeKeys = keys.filter((k) => k.usedBytes > 0);
+  const activeKeys = initialKeys.filter((k) => k.usedBytes > 0);
 
   if (error) {
     return (
@@ -432,8 +624,6 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
             <h1 className="text-3xl font-semibold tracking-tight text-black dark:text-white">
               Outline Dashboard
             </h1>
-
-            {/* Server name — click to rename */}
             <div className="mt-1 flex items-center gap-1.5">
               {isRenamingServer ? (
                 <input
@@ -452,7 +642,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                 <button
                   onClick={startRenameServer}
                   title="Click to rename server"
-                  className="group flex items-center gap-1.5 text-sm text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                  className="group flex items-center gap-1.5 text-sm text-cyan-600 transition hover:text-cyan-500 dark:text-cyan-400 dark:hover:text-cyan-300"
                 >
                   <span>
                     {serverInfo.name || 'Outline Server'}
@@ -466,9 +656,18 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
           </div>
 
           <div className="mt-1 flex items-center gap-3">
-            <span className={`rounded-full px-3 py-1 text-xs font-medium ${isMetricsEnabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'}`}>
-              {isMetricsEnabled ? '● Metrics On' : '○ Metrics Off'}
-            </span>
+            <button
+              onClick={handleToggleMetrics}
+              disabled={isTogglingMetrics}
+              title={metricsEnabled ? 'Click to disable metrics' : 'Click to enable metrics'}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition disabled:opacity-50 ${
+                metricsEnabled
+                  ? 'bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 dark:text-emerald-400'
+                  : 'bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20 dark:text-yellow-400'
+              }`}
+            >
+              {metricsEnabled ? '● Metrics On' : '○ Metrics Off'}
+            </button>
             <a href="https://auth.chitminthu.me/logout"
               className="rounded-full border border-black/10 px-4 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-400 dark:hover:bg-white/5">
               Sign out
@@ -476,15 +675,9 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
           </div>
         </div>
 
-        {!isMetricsEnabled && (
-          <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/10 px-5 py-4 text-sm text-yellow-700 dark:text-yellow-400">
-            Metrics are disabled. Enable them in Outline Manager to track data usage accurately.
-          </div>
-        )}
-
         {/* Summary Stats */}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <StatCard label="Total Keys" value={keys.length} sub={`${serverInfo.unusedKeys ?? 0} never used`} />
+          <StatCard label="Total Keys" value={initialKeys.length} sub={`${serverInfo.unusedKeys ?? 0} never used`} />
           <StatCard label="Active Keys" value={serverInfo.activeKeys ?? 0} sub="used at least once" />
           <StatCard label="Total Usage" value={formatBytes(serverInfo.totalUsage)} sub={`avg ${formatBytes(serverInfo.avgUsageBytes)} / active key`} />
           <StatCard label="Over Limit" value={serverInfo.keysOverLimit ?? 0}
@@ -494,6 +687,8 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
 
         {/* Server Info + Traffic + Add Key */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+
+          {/* Server Details */}
           <div className="rounded-xl border border-black/10 bg-white p-5 dark:border-white/10 dark:bg-zinc-900/50">
             <h2 className="mb-4 text-xs font-medium uppercase tracking-wider text-zinc-400">Server Details</h2>
             <dl className="space-y-3 text-sm">
@@ -504,7 +699,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                 ['Port', serverInfo.portForNewAccessKeys],
                 ['Created', formatDate(serverInfo.createdTimestampMs)],
                 ['Uptime', formatUptime(serverInfo.createdTimestampMs)],
-                ['Default Limit', serverInfo.defaultLimitBytes ? formatBytes(serverInfo.defaultLimitBytes) : 'None'],
+                ['Cipher', serverInfo.cipher],
                 ['Server ID', serverInfo.serverId],
               ].map(([label, value]) =>
                 value !== null && value !== undefined ? (
@@ -514,9 +709,40 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                   </div>
                 ) : null
               )}
+              <div className="flex items-center justify-between gap-3">
+                <dt className="shrink-0 text-sm text-zinc-400">Default Limit</dt>
+                <dd className="text-right">
+                  {isEditingServerLimit ? (
+                    <input
+                      ref={serverLimitInputRef}
+                      value={serverLimitValue}
+                      onChange={(e) => setServerLimitValue(e.target.value)}
+                      onBlur={commitServerLimit}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitServerLimit();
+                        if (e.key === 'Escape') setIsEditingServerLimit(false);
+                      }}
+                      placeholder="e.g. 100GB"
+                      className="w-28 rounded-md border border-zinc-300 bg-transparent px-2 py-0.5 text-right font-mono text-sm text-zinc-900 focus:border-zinc-500 focus:outline-none dark:border-zinc-600 dark:text-zinc-50"
+                    />
+                  ) : (
+                    <button
+                      onClick={startEditServerLimit}
+                      title="Click to set default limit (leave empty to remove)"
+                      className="group flex items-center gap-1 font-mono text-sm text-cyan-600 transition hover:text-cyan-500 dark:text-cyan-400 dark:hover:text-cyan-300"
+                    >
+                      {serverInfo.defaultLimitBytes
+                        ? formatBytes(serverInfo.defaultLimitBytes)
+                        : <span className="text-zinc-300 dark:text-zinc-600">None</span>}
+                      <span className="opacity-0 text-xs text-zinc-400 transition group-hover:opacity-100">✎</span>
+                    </button>
+                  )}
+                </dd>
+              </div>
             </dl>
           </div>
 
+          {/* Traffic Breakdown */}
           <div className="rounded-xl border border-black/10 bg-white p-5 dark:border-white/10 dark:bg-zinc-900/50">
             <h2 className="mb-4 text-xs font-medium uppercase tracking-wider text-zinc-400">Traffic Breakdown</h2>
             {activeKeys.length === 0 ? (
@@ -545,6 +771,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
             )}
           </div>
 
+          {/* Add Key */}
           <div className="rounded-xl border border-black/10 bg-white p-5 dark:border-white/10 dark:bg-zinc-900/50">
             <h2 className="mb-4 text-xs font-medium uppercase tracking-wider text-zinc-400">Add New Key</h2>
             <form onSubmit={handleAddKey} className="flex flex-col gap-3">
@@ -580,27 +807,45 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-black/10 dark:border-white/10">
               <tr>
-                {['Name / ID', 'Cipher · Port', 'Data Used', 'Limit', 'Traffic Share', 'Key', 'Actions'].map((h) => (
-                  <th key={h} className="whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">{h}</th>
-                ))}
+                {/* Name is sortable */}
+                <SortHeader label="Name / ID" field="name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                {/* Data Used is sortable */}
+                <SortHeader label="Data Used" field="usedBytes" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                {/* Limit — not sortable, just a header */}
+                <th className="whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Limit</th>
+                {/* Traffic Share is sortable */}
+                <SortHeader label="Traffic Share" field="trafficShare" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                {/* Experimental columns — only if available */}
+                {hasExperimental && (
+                  <SortHeader label="Last Active" field="lastTrafficSeen" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                )}
+                {hasExperimental && (
+                  <SortHeader label="Devices" field="peakDeviceCount" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                )}
+                <th className="whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Key</th>
+                <th className="whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-black/10 dark:divide-white/10">
               {keys.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-5 py-12 text-center text-zinc-400">
+                  <td colSpan={hasExperimental ? 8 : 6} className="px-5 py-12 text-center text-zinc-400">
                     No access keys yet. Add one above.
                   </td>
                 </tr>
               ) : (
                 keys.map((key, i) => {
-                  const isTop = i === 0 && key.usedBytes > 0;
+                  // "Top" badge based on original sort position (highest data user)
+                  const isTop = key.id === initialKeys[0]?.id && key.usedBytes > 0;
                   const neverUsed = key.usedBytes === 0;
                   const isRenaming = renamingId === key.id;
                   const isEditingLimit = limitEditId === key.id;
+                  const lastSeen = formatLastSeen(key.lastTrafficSeen);
 
                   return (
                     <tr key={key.id} className="transition-colors hover:bg-zinc-50 dark:hover:bg-white/[0.03]">
+
+                      {/* Name + ID */}
                       <td className="px-5 py-4">
                         <div className="flex flex-col gap-1">
                           <div className="flex flex-wrap items-center gap-1.5">
@@ -621,7 +866,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                               <button
                                 onClick={() => startRename(key)}
                                 title="Click to rename"
-                                className="group flex items-center gap-1 font-mono font-medium text-zinc-900 transition hover:text-zinc-600 dark:text-zinc-50 dark:hover:text-zinc-300"
+                                className="group flex items-center gap-1 font-mono font-medium text-cyan-600 transition hover:text-cyan-500 dark:text-cyan-400 dark:hover:text-cyan-300"
                               >
                                 {key.name || 'Untitled'}
                                 <span className="opacity-0 text-xs text-zinc-400 transition group-hover:opacity-100">✎</span>
@@ -635,13 +880,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                         </div>
                       </td>
 
-                      <td className="px-5 py-4 font-mono text-xs">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="text-zinc-700 dark:text-zinc-300">{key.method || '—'}</span>
-                          {key.port && <span className="text-zinc-400">:{key.port}</span>}
-                        </div>
-                      </td>
-
+                      {/* Data Used */}
                       <td className="px-5 py-4">
                         <span className="font-mono text-zinc-900 dark:text-zinc-100">{formatBytes(key.usedBytes)}</span>
                         {key.limitBytes && (
@@ -654,6 +893,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                         )}
                       </td>
 
+                      {/* Per-key Limit */}
                       <td className="px-5 py-4 font-mono text-sm">
                         {isEditingLimit ? (
                           <input
@@ -672,7 +912,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                           <button
                             onClick={() => startLimitEdit(key)}
                             title="Click to set limit (leave empty to remove)"
-                            className="group flex items-center gap-1 transition"
+                            className="group flex items-center gap-1 text-cyan-600 transition hover:text-cyan-500 dark:text-cyan-400 dark:hover:text-cyan-300"
                           >
                             {key.limitBytes
                               ? <span className="text-zinc-600 dark:text-zinc-400">{formatBytes(key.limitBytes)}</span>
@@ -682,6 +922,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                         )}
                       </td>
 
+                      {/* Traffic Share */}
                       <td className="px-5 py-4 font-mono text-sm">
                         {key.usedBytes > 0 ? (
                           <div>
@@ -693,6 +934,25 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                         ) : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
                       </td>
 
+                      {/* Last Active */}
+                      {hasExperimental && (
+                        <td className="px-5 py-4 text-xs">
+                          {lastSeen
+                            ? <span className="font-mono text-zinc-600 dark:text-zinc-400">{lastSeen}</span>
+                            : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
+                        </td>
+                      )}
+
+                      {/* Peak Devices */}
+                      {hasExperimental && (
+                        <td className="px-5 py-4 text-xs font-mono">
+                          {key.peakDeviceCount != null
+                            ? <span className="text-zinc-600 dark:text-zinc-400">{key.peakDeviceCount}</span>
+                            : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
+                        </td>
+                      )}
+
+                      {/* Key — Copy + QR */}
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-2">
                           <button
@@ -710,6 +970,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                         </div>
                       </td>
 
+                      {/* Actions */}
                       <td className="px-5 py-4">
                         <button
                           onClick={() => setDeleteTarget(key)}
@@ -718,6 +979,7 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
                           Delete
                         </button>
                       </td>
+
                     </tr>
                   );
                 })
@@ -727,7 +989,8 @@ export default function ServerDetail({ serverId, keys, serverInfo, isMetricsEnab
         </div>
 
         <p className="text-center text-xs text-zinc-400">
-          Usage is cumulative since server creation · Sorted by data used (highest first) · Click any name or limit to edit
+          Usage is cumulative since server creation · Click any column header to sort · Click any name or limit to edit
+          {hasExperimental && ' · Last Active and Devices from last 24h'}
         </p>
 
       </main>

@@ -10,14 +10,19 @@ Outline's official manager is a desktop app — you're stuck on one machine to m
 
 - **Multi-server dashboard** — manage multiple Outline servers from one place with live status cards
 - Add and delete access keys from any browser
-- Inline rename for keys and server names
-- Per-key data limits — set, update, or remove
+- Inline rename for keys and server names — editable fields are highlighted in cyan
+- Per-key data limits — set, update, or remove inline
+- **Default server limit** — view and edit the server-wide default data limit from Server Details
 - Data usage per key with visual progress bars
 - Traffic share breakdown across all keys
+- **Sortable table** — click any column header to sort by name, data used, traffic share, last active, or devices
+- **Metrics toggle** — enable or disable anonymous Jigsaw telemetry directly from the dashboard header
+- **Last Active per key** — when each key last had traffic (requires Outline Server v1.2+)
+- **Peak device count per key** — max simultaneous devices recorded in the last 24h (requires Outline Server v1.2+)
 - QR codes for easy mobile key sharing
-- Server info: hostname, version, port, cipher, uptime
+- Server info panel: hostname, version, port, cipher, uptime, created date
 - Flags top consumer, unused keys, and keys over their limit
-- Support dark mode
+- Dark mode support
 - Authentication via Authelia + Traefik
 
 ## Screenshots
@@ -53,9 +58,11 @@ Add servers through the dashboard UI by pasting their API URLs. Each server is s
 |---|---|
 | Not web-accessible | `data/` is outside `public/` — Next.js never serves it over HTTP |
 | File permissions | Written with mode `0600` — owner read/write only |
+| Directory permissions | `data/` directory is mode `0700` |
 | Never sent to browser | All API routes call `safeServer()` which strips `apiUrl` before responding |
 | Gitignored | `data/` is in `.gitignore` — can never be accidentally committed |
 | Docker volume | In production, `data/` is a named volume — never baked into the image |
+| Read-only container | `read_only: true` prevents writes anywhere except the data volume and `/tmp` |
 
 ### API tokens
 
@@ -384,6 +391,9 @@ services:
     env_file: ./app/.env
     volumes:
       - ./data:/app/data        # persists servers.json across container rebuilds
+    read_only: true             # container filesystem is read-only except data/ and /tmp
+    tmpfs:
+      - /tmp                    # Next.js needs a writable /tmp at runtime
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.outline.rule=Host(`outline.yourdomain.com`)"
@@ -393,7 +403,17 @@ services:
       - "traefik.http.routers.outline.middlewares=authelia@file"
 ```
 
-### Step 9 — Deploy
+### Step 9 — Data folder permissions
+
+The container runs as uid 1001 (`nextjs`). The host `data/` folder must be owned by the same uid — if it's owned by root, the container will get `Permission denied` when reading or writing `servers.json`.
+
+```bash
+chown -R 1001:1001 /opt/outline-stack/data
+chmod 700 /opt/outline-stack/data
+chmod 600 /opt/outline-stack/data/servers.json
+```
+
+### Step 10 — Deploy
 
 ```bash
 docker network create proxy
@@ -434,7 +454,15 @@ ls -la /opt/outline-stack/app/.env
 ls -la /opt/outline-stack/data/servers.json
 # Both should show -rw------- (600)
 
-# 5. Confirm Outline API port is blocked
+# 5. Confirm data/ is owned by uid 1001
+ls -la /opt/outline-stack/ | grep data
+# Should show: drwx------ 2 1001 1001
+
+# 6. Confirm read-only filesystem is enforced
+docker exec outline-app touch /app/test 2>&1
+# Expected: touch: /app/test: Read-only file system
+
+# 7. Confirm Outline API port is blocked from public internet
 ufw status | grep 39992
 # Should show DENY or not appear (only 22/80/443 open)
 ```
@@ -455,6 +483,8 @@ ufw status | grep 39992
 - The Outline API only stores cumulative bytes since server creation — there is no per-period usage without snapshotting
 - `rejectUnauthorized: false` is set for Outline API connections since Outline uses a self-signed certificate by default
 - The `apiUrl` is never returned to the browser under any circumstances — only `id`, `name`, and `addedAt` are exposed to the client
+- **Last Active** and **Peak Devices** use the experimental Outline API (`/experimental/server/metrics?since=24h`). These columns only appear if your server supports the endpoint. If unavailable, they are hidden automatically with no errors
+- The experimental API `since` parameter accepts a duration string (e.g. `24h`) — Unix timestamps and ISO dates are not accepted
 
 ---
 
