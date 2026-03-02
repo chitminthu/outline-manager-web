@@ -68,6 +68,24 @@ function parseLimit(str) {
   return Math.floor(num * multipliers[unit]);
 }
 
+function countryFlag(code) {
+  if (!code || code.length !== 2) return '🌐';
+  return String.fromCodePoint(
+    ...code.toUpperCase().split('').map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)
+  );
+}
+
+function countryName(code) {
+  const names = {
+    MM: 'Myanmar', SG: 'Singapore', GB: 'United Kingdom', US: 'United States',
+    TH: 'Thailand', MY: 'Malaysia', ID: 'Indonesia', JP: 'Japan', KR: 'South Korea',
+    CN: 'China', IN: 'India', AU: 'Australia', DE: 'Germany', FR: 'France',
+    CA: 'Canada', BR: 'Brazil', NL: 'Netherlands', RU: 'Russia', TR: 'Turkey',
+    PH: 'Philippines', VN: 'Vietnam', BD: 'Bangladesh', PK: 'Pakistan',
+  };
+  return names[code] || code;
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function UsageBar({ used, limit }) {
@@ -104,7 +122,6 @@ function Badge({ children, color }) {
   );
 }
 
-// Sortable column header — shows arrow indicator for active sort
 function SortHeader({ label, field, sortField, sortDir, onSort }) {
   const isActive = sortField === field;
   return (
@@ -119,6 +136,95 @@ function SortHeader({ label, field, sortField, sortDir, onSort }) {
         </span>
       </span>
     </th>
+  );
+}
+
+function LocationBreakdown({ locations }) {
+  const [expandedCountry, setExpandedCountry] = useState(null);
+
+  if (!locations || locations.length === 0) return null;
+
+  const grandTotal = locations.reduce((s, l) => s + (l.dataTransferred?.bytes || 0), 0);
+  if (grandTotal === 0) return null;
+
+  const byCountry = {};
+  for (const loc of locations) {
+    const code = loc.location || 'XX';
+    if (!byCountry[code]) byCountry[code] = { code, isps: [], totalBytes: 0 };
+    const bytes = loc.dataTransferred?.bytes || 0;
+    byCountry[code].totalBytes += bytes;
+    if (bytes > 0) byCountry[code].isps.push({ org: loc.asOrg || `ASN ${loc.asn}`, bytes });
+  }
+
+  const countries = Object.values(byCountry)
+    .filter((c) => c.totalBytes > 0)
+    .sort((a, b) => b.totalBytes - a.totalBytes);
+
+  if (countries.length === 0) return null;
+
+  return (
+    <div className="rounded-xl border border-black/10 bg-white p-5 dark:border-white/10 dark:bg-zinc-900/50">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-zinc-400">Location Breakdown</h2>
+        <span className="text-xs text-zinc-400">Last 24h · {countries.length} countries</span>
+      </div>
+      <div className="space-y-3">
+        {countries.map((country) => {
+          const pct = ((country.totalBytes / grandTotal) * 100).toFixed(1);
+          const isExpanded = expandedCountry === country.code;
+          const hasIsps = country.isps.length > 0;
+          return (
+            <div key={country.code}>
+              <button
+                onClick={() => hasIsps && setExpandedCountry(isExpanded ? null : country.code)}
+                className={`w-full text-left ${hasIsps ? 'cursor-pointer' : 'cursor-default'}`}
+              >
+                <div className="flex items-center justify-between text-sm">
+                  <span className="flex items-center gap-2 font-medium text-zinc-800 dark:text-zinc-200">
+                    <span className="text-base leading-none">{countryFlag(country.code)}</span>
+                    {countryName(country.code)}
+                    {hasIsps && (
+                      <span className="text-xs text-zinc-400">
+                        {isExpanded ? '▲' : '▼'} {country.isps.length} ISP{country.isps.length > 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </span>
+                  <span className="ml-2 flex items-center gap-2 font-mono text-xs text-zinc-500">
+                    <span>{formatBytes(country.totalBytes)}</span>
+                    <span className="w-8 text-right">{pct}%</span>
+                  </span>
+                </div>
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                  <div className="h-full rounded-full bg-cyan-500 transition-all" style={{ width: `${pct}%` }} />
+                </div>
+              </button>
+              {isExpanded && (
+                <div className="ml-6 mt-2 space-y-2 border-l border-zinc-100 pl-4 dark:border-zinc-800">
+                  {country.isps.sort((a, b) => b.bytes - a.bytes).map((isp, i) => {
+                    const ispPct = ((isp.bytes / country.totalBytes) * 100).toFixed(1);
+                    return (
+                      <div key={i}>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="truncate text-zinc-600 dark:text-zinc-400">{isp.org}</span>
+                          <span className="ml-2 flex shrink-0 items-center gap-2 font-mono text-zinc-400">
+                            <span>{formatBytes(isp.bytes)}</span>
+                            <span className="w-8 text-right">{ispPct}%</span>
+                          </span>
+                        </div>
+                        <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                          <div className="h-full rounded-full bg-cyan-400/60 transition-all" style={{ width: `${ispPct}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-4 text-xs text-zinc-400">Click a country to see ISP breakdown · Data from last 24 hours only</p>
+    </div>
   );
 }
 
@@ -215,7 +321,6 @@ export async function getServerSideProps({ params }) {
 
         const exp = experimentalByKeyId[key.id] || null;
         const lastTrafficSeen = exp?.connection?.lastTrafficSeen || null;
-        // peakDeviceCount.data is the count — use ?? not || so 0 is preserved
         const peakDeviceCount = exp?.connection?.peakDeviceCount?.data ?? null;
 
         return {
@@ -231,7 +336,7 @@ export async function getServerSideProps({ params }) {
           peakDeviceCount,
         };
       })
-      .sort((a, b) => b.usedBytes - a.usedBytes); // default sort
+      .sort((a, b) => b.usedBytes - a.usedBytes);
 
     const activeKeys = keys.filter((k) => k.usedBytes > 0).length;
     const unusedKeys = keys.filter((k) => k.usedBytes === 0).length;
@@ -261,6 +366,7 @@ export async function getServerSideProps({ params }) {
         },
         isMetricsEnabled,
         hasExperimental,
+        locations: experimentalRes?.data?.server?.locations || [],
       },
     };
   } catch {
@@ -271,6 +377,7 @@ export async function getServerSideProps({ params }) {
         serverInfo: { name: server.name },
         isMetricsEnabled: false,
         hasExperimental: false,
+        locations: [],
         error: 'Could not connect to the Outline server.',
       },
     };
@@ -279,25 +386,21 @@ export async function getServerSideProps({ params }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, isMetricsEnabled, hasExperimental, error }) {
+export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, isMetricsEnabled, hasExperimental, locations, error }) {
   const router = useRouter();
 
-  // Sorting state — default: data used descending
   const [sortField, setSortField] = useState('usedBytes');
   const [sortDir, setSortDir] = useState('desc');
 
-  // Clicking the same column toggles direction; clicking a new column defaults to desc
   const handleSort = (field) => {
     if (field === sortField) {
       setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
     } else {
       setSortField(field);
-      // name sorts asc by default (A→Z); everything else desc (highest first)
       setSortDir(field === 'name' ? 'asc' : 'desc');
     }
   };
 
-  // Apply sort to keys — no server round-trip, purely client-side
   const keys = [...initialKeys].sort((a, b) => {
     let aVal, bVal;
     switch (sortField) {
@@ -306,71 +409,45 @@ export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, 
         bVal = (b.name || '').toLowerCase();
         return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       case 'usedBytes':
-        aVal = a.usedBytes;
-        bVal = b.usedBytes;
-        break;
+        aVal = a.usedBytes; bVal = b.usedBytes; break;
       case 'trafficShare':
-        aVal = a.trafficShare;
-        bVal = b.trafficShare;
-        break;
+        aVal = a.trafficShare; bVal = b.trafficShare; break;
       case 'lastTrafficSeen':
-        // null (never used) always goes to bottom regardless of sort direction
         if (!a.lastTrafficSeen && !b.lastTrafficSeen) return 0;
         if (!a.lastTrafficSeen) return 1;
         if (!b.lastTrafficSeen) return -1;
-        aVal = a.lastTrafficSeen;
-        bVal = b.lastTrafficSeen;
-        break;
+        aVal = a.lastTrafficSeen; bVal = b.lastTrafficSeen; break;
       case 'peakDeviceCount':
-        aVal = a.peakDeviceCount ?? -1;
-        bVal = b.peakDeviceCount ?? -1;
-        break;
+        aVal = a.peakDeviceCount ?? -1; bVal = b.peakDeviceCount ?? -1; break;
       default:
         return 0;
     }
     return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
   });
 
-  // Add key
   const [newKeyName, setNewKeyName] = useState('');
   const [isAdding, setIsAdding] = useState(false);
-
-  // Delete key
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
-
-  // Inline key rename
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef(null);
-
-  // Inline per-key limit edit
   const [limitEditId, setLimitEditId] = useState(null);
   const [limitEditValue, setLimitEditValue] = useState('');
   const limitInputRef = useRef(null);
-
-  // Inline server default limit edit
   const [isEditingServerLimit, setIsEditingServerLimit] = useState(false);
   const [serverLimitValue, setServerLimitValue] = useState(
     serverInfo.defaultLimitBytes ? formatBytes(serverInfo.defaultLimitBytes).replace(' ', '') : ''
   );
   const serverLimitInputRef = useRef(null);
-
-  // Server name rename
   const [isRenamingServer, setIsRenamingServer] = useState(false);
   const [serverNameValue, setServerNameValue] = useState(serverInfo.name || '');
   const serverNameInputRef = useRef(null);
-
-  // Metrics toggle — optimistic
   const [metricsEnabled, setMetricsEnabled] = useState(isMetricsEnabled);
   const [isTogglingMetrics, setIsTogglingMetrics] = useState(false);
-
-  // QR modal
   const [qrKey, setQrKey] = useState(null);
 
   const refresh = useCallback(() => router.replace(router.asPath), [router]);
-
-  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleAddKey = async (e) => {
     e.preventDefault();
@@ -802,20 +879,20 @@ export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, 
           </div>
         </div>
 
+        {/* Location Breakdown — only shown if experimental API available and has data */}
+        {hasExperimental && locations.length > 0 && (
+          <LocationBreakdown locations={locations} />
+        )}
+
         {/* Keys Table */}
         <div className="overflow-x-auto rounded-xl border border-black/10 bg-white dark:border-white/10 dark:bg-zinc-900/50">
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-black/10 dark:border-white/10">
               <tr>
-                {/* Name is sortable */}
                 <SortHeader label="Name / ID" field="name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-                {/* Data Used is sortable */}
                 <SortHeader label="Data Used" field="usedBytes" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-                {/* Limit — not sortable, just a header */}
                 <th className="whitespace-nowrap px-5 py-4 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Limit</th>
-                {/* Traffic Share is sortable */}
                 <SortHeader label="Traffic Share" field="trafficShare" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-                {/* Experimental columns — only if available */}
                 {hasExperimental && (
                   <SortHeader label="Last Active" field="lastTrafficSeen" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
                 )}
@@ -834,8 +911,7 @@ export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, 
                   </td>
                 </tr>
               ) : (
-                keys.map((key, i) => {
-                  // "Top" badge based on original sort position (highest data user)
+                keys.map((key) => {
                   const isTop = key.id === initialKeys[0]?.id && key.usedBytes > 0;
                   const neverUsed = key.usedBytes === 0;
                   const isRenaming = renamingId === key.id;
@@ -990,7 +1066,7 @@ export default function ServerDetail({ serverId, keys: initialKeys, serverInfo, 
 
         <p className="text-center text-xs text-zinc-400">
           Usage is cumulative since server creation · Click any column header to sort · Click any name or limit to edit
-          {hasExperimental && ' · Last Active and Devices from last 24h'}
+          {hasExperimental && ' · Last Active, Devices, and Location data from last 24h'}
         </p>
 
       </main>
